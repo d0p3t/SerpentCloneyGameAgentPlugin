@@ -1,16 +1,21 @@
 import serpent.cv
 import serpent.ocr as ocr
+import serpent.utilities
 
 from serpent.game_agent import GameAgent
+
+from serpent.frame_grabber import FrameGrabber
+
 from serpent.machine_learning.context_classification.context_classifiers.cnn_inception_v3_context_classifier import CNNInceptionV3ContextClassifier
 
 from serpent.machine_learning.reinforcement_learning.ddqn import DDQN
 from serpent.machine_learning.reinforcement_learning.keyboard_mouse_action_space import KeyboardMouseActionSpace
 
 from serpent.input_controller import KeyboardKey
-from serpent.input_controller import MouseButton
 
 from .helpers.ml import ObjectDetector
+
+from datetime import datetime
 
 import offshoot
 import xtermcolor
@@ -21,8 +26,7 @@ import time
 import gc
 import os
 
-from datetime import datetime
-
+import collections
 
 class SerpentCloneyGameAgent(GameAgent):
 
@@ -62,106 +66,95 @@ class SerpentCloneyGameAgent(GameAgent):
     # -----------DQN TODO ---------
     # =============================
     def setup_play_ddqn(self):
-        self.plugin_path = offshoot.config["file_paths"]["plugins"]
-
-        context_classifier_path = f"{self.plugin_path}/SerpentCloneyGameAgentPlugin/files/ml_models/cloney_context_classifier.model"
-
-        context_classifier = CNNInceptionV3ContextClassifier(input_shape=(288, 512, 3))
-        context_classifier.prepare_generators()
-        context_classifier.load_classifier(context_classifier_path)
-
-        self.machine_learning_models["context_classifier"] = context_classifier
 
         self._reset_game_state()
 
         input_mapping = {
-            "W": [KeyboardKey.KEY_W],
-            "S": [KeyboardKey.KEY_S]
+            "UP": [KeyboardKey.KEY_SPACE]
         }
-        # "A": [self.input_controller.tap_key(KeyboardKey.KEY_A)],
-        # "S": [self.input_controller.tap_key(KeyboardKey.KEY_S)],
-        # "D": [self.input_controller.tap_key(KeyboardKey.KEY_D)],
-        # "ENTER": [self.input_controller.tap_key(KeyboardKey.KEY_ENTER)],
-        # "L_CLICK": [self.input_controller.tap_key(MouseButton.LEFT)]
-        action_space = KeyboardMouseActionSpace(
-            default_keys=[None, "W", "S"]
+
+        self.key_mapping = {
+            KeyboardKey.KEY_SPACE.name: "UP"
+        }
+
+        movement_action_space = KeyboardMouseActionSpace(
+            default_keys=[None, "UP"]
         )
 
-        # model_file_path = ''
-        # model_file_path if os.path.isfile(model_file_path) else
+        movement_model_file_path = "datasets/cloney_direction_dqn_0_1_.hp5".replace("/", os.sep)
+
         self.dqn_movement = DDQN(
-            model_file_path=None,
-            input_shape=(72, 128, 4),
+            model_file_path=movement_model_file_path if os.path.isfile(movement_model_file_path) else None,
+            input_shape=(100, 100, 4),
             input_mapping=input_mapping,
-            action_space=action_space,
+            action_space=movement_action_space,
             replay_memory_size=5000,
-            max_steps=100000,
-            observe_steps=500,
+            max_steps=1000000,
+            observe_steps=1000,
             batch_size=32,
-            initial_epsilon=0.1,
-            final_epsilon=0.0001,
+            model_learning_rate=1e-4,
+            initial_epsilon=1,
+            final_epsilon=0.01,
             override_epsilon=False
             )
 
     def handle_play_ddqn(self, game_frame):
         gc.disable()
 
-        context = self.machine_learning_models["context_classifier"].predict(game_frame.frame)
-
         if self.dqn_movement.first_run:
-            if context == "GAME_OVER":
-                #self.input_controller.tap_key(KeyboardKey.KEY_ENTER)
-                self.input_controller.click_screen_region(screen_region="GAME_OVER_PLAY")
+            self.input_controller.tap_key(KeyboardKey.KEY_W)
 
             self.dqn_movement.first_run = False
 
+            time.sleep(5)
+
             return None
 
-        if context == "GAME_WORLD_1":
-            self.game_state['alive'] = True
-        else:
-            self.game_state['alive'] = False
+        dragon_alive = self._measure_dragon_alive(game_frame)
+        # dragon_coins = self._measure_dragon_coins(game_frame)
+
+        self.game_state["alive"].appendleft(dragon_alive)
+        # self.game_state["coins"].appendleft(dragon_coins)
 
         if self.dqn_movement.frame_stack is None:
-            self.dqn_movement.build_frame_stack(game_frame.eighth_resolution_grayscale_frame)
+            # pipeline_game_frame = FrameGrabber.get_frames(
+            #     [0],
+            #     frame_shape=game_frame.frame.shape,
+            #     frame_type="MINI"
+            # ).frames[0]
+
+            self.dqn_movement.build_frame_stack(game_frame.ssim_frame)
         else:
-            if self.dqn_movement.mode in ["TRAIN", "OBSERVE"]:
-                reward = self._calculate_dragon_train_reward(context=context)
+            game_frame_buffer = FrameGrabber.get_frames(
+                [0, 4, 8, 12],
+                frame_shape=game_frame.frame.shape,
+                frame_type="MINI"
+                )
+
+            if self.dqn_movement.mode == "TRAIN":
+                reward = self._calculate_reward()
 
                 self.game_state["run_reward"] += reward
 
-                if context == "GAME_OVER":
-                    self.game_state['alive'] = False
-                elif context == "GAME_WORLD_1":
-                    self.game_state['alive'] = True
-
-                if len(self.game_frame_buffer.frames) % 5 == 0:
-                    self.game_frame_buffer.frames = self.game_frame_buffer.frames[:-1]
-
                 self.dqn_movement.append_to_replay_memory(
-                    self.game_frame_buffer,
+                    game_frame_buffer,
                     reward,
-                    terminal=self.game_state['alive']
+                    terminal=self.game_state["alive"] == 0
                 )
                 # Every 2000 steps, save latest weights to disk
                 if self.dqn_movement.current_step % 2000 == 0:
                     self.dqn_movement.save_model_weights(
-                        file_path_prefix=f"datasets/cloney_weights_world"
+                        file_path_prefix=f"datasets/cloney_movement"
                     )
 
                 # Every 20000 steps, save weights checkpoint to disk
-                # if self.dqn_movement.current_step % 20000 == 0:
-                #     self.dqn_movement.save_model_weights(
-                #         file_path_prefix=f"datasets/cloney_weights_movement",
-                #         is_checkpoint=True
-                #     )
+                if self.dqn_movement.current_step % 20000 == 0:
+                    self.dqn_movement.save_model_weights(
+                        file_path_prefix=f"datasets/cloney_movement",
+                        is_checkpoint=True
+                    )
 
             elif self.dqn_movement.mode == "RUN":
-                if context == "GAME_OVER":
-                    self.game_state['alive'] = False
-                elif context == "GAME_WORLD_1":
-                    self.game_state['alive'] = True
-
                 self.dqn_movement.update_frame_stack(self.game_frame_buffer)
 
             run_time = datetime.now() - self.started_at
@@ -169,21 +162,30 @@ class SerpentCloneyGameAgent(GameAgent):
             print("\033c" + f"SESSION RUN TIME: {run_time.days} days, {run_time.seconds // 3600} hours, {(run_time.seconds // 60) % 60} minutes, {run_time.seconds % 60} seconds")
             print("")
 
-            print("NEURAL NETWORK:\n")
+            print("MOVEMENT NEURAL NETWORK:\n")
             self.dqn_movement.output_step_data()
 
             print("")
             print(f"CURRENT RUN: {self.game_state['current_run']}")
-            print(f"CURRENT RUN REWARD: {round(self.game_state['run_reward'], 3)}")
-            print(f"CURRENT RUN PREDICTEssssssssssssssssssssssD ACTIONS: {self.game_state['run_predicted_actions']}")
-            print(f"AVERAGE ACTIONS PER SECOND: {round(self.game_state['average_aps'], 2)}")
-            print(f"CURRENT ALIVE STATUS: {self.game_state['alive']}")
+            print(f"CURRENT RUN REWARD: {round(self.game_state['run_reward'], 2)}")
+            print(f"CURRENT RUN PREDICTED ACTIONS: {self.game_state['run_predicted_actions']}")
+            print(f"CURRENT DRAGON ALIVE: {self.game_state['alive'][0]}")
+            # print(f"CURRENT DRAGON COINS: {self.game_state['coins'][0]})
+
+            print("")
+            # print(f"AVERAGE ACTIONS PER SECOND: {round(self.game_state['average_aps'], 2)}")
             print("")
             print(f"LAST RUN DURATION: {self.game_state['last_run_duration']} seconds")
+            # print(f"LAST RUN COINS: {self.game_state['last_run_coins'][0]})
 
-            if self.game_state['alive'] is False:
+            print("")
+            print(f"RECORD TIME ALIVE: {self.game_state['record_time_alive'].get('value')} seconds (Run {self.game_state['record_time_alive'].get('run')}, {'Predicted' if self.game_state['record_time_alive'].get('predicted') else 'Training'})")
+            # print(f"RECORD COINS COLLECTED: {self.game_state['record_coins_collected'].get('value')} coins (Run {self.game_state['record_coins_collected'].get('run')}, {'Predicted' if self.game_state['record_coins_collected'].get('predicted') else 'Training'})")
+            print("")
+            print(f"RANDOM AVERAGE TIME ALIVE: {self.game_state['random_time_alive']} seconds")
 
-                print("\033c")
+            if self.game_state["alive"][1] <= 0:
+                serpent.utilities.clear_terminal()
                 timestamp = datetime.utcnow()
 
                 gc.enable()
@@ -200,34 +202,27 @@ class SerpentCloneyGameAgent(GameAgent):
                         self.game_state["record_time_alive"] = {
                             "value": self.game_state["last_run_duration"],
                             "run": self.game_state["current_run"],
-                            "predicted": self.dqn_movement.mode == "RUN",
-                            "alive": self.game_state["alive"]
+                            "predicted": self.dqn_movement.mode == "RUN"
                         }
 
-                    # if self.game_state["boss_health"][0] < self.game_state["record_boss_hp"].get("value", 1000):
-                    #     self.game_state["record_boss_hp"] = {
-                    #         "value": self.game_state["boss_health"][0],
+                    # if self.game_state["coins"][0] < self.game_state["record_coins_collected"].get("value", 1000):
+                    #     self.game_state["record_coins_collected"] = {
+                    #         "value": self.game_state["coins"][0],
                     #         "run": self.game_state["current_run"],
-                    #         "predicted": self.dqn_movement.mode == "RUN",
-                    #         "time_alive": self.game_state["last_run_duration"]
+                    #         "predicted": self.dqn_movement.mode == "RUN"
                     #     }
                 else:
                     self.game_state["random_time_alives"].append(self.game_state["last_run_duration"])
-                    self.game_state["random_boss_hps"].append(self.game_state["boss_health"][0])
-
                     self.game_state["random_time_alive"] = np.mean(self.game_state["random_time_alives"])
-                    self.game_state["random_boss_hp"] = np.mean(self.game_state["random_boss_hps"])
 
-                # Compute APS
-                self.game_state["average_aps"] = self.game_state["current_run_steps"] / self.game_state["last_run_duration"]
                 self.game_state["current_run_steps"] = 0
 
-                self.input_controller.release_key(KeyboardKey.KEY_W)
+                self.input_controller.release_key(KeyboardKey.KEY_SPACE)
 
                 if self.dqn_movement.mode == "TRAIN":
-                    for i in range(10):
-                        print("\033c")
-                        print(f"TRAINING ON MINI-BATCHES: {i + 1}/10")
+                    for i in range(8):
+                        serpent.utilities.clear_terminal()
+                        print(f"TRAINING ON MINI-BATCHES: {i + 1}/8")
                         print(f"NEXT RUN: {self.game_state['current_run'] + 1} {'- AI RUN' if (self.game_state['current_run'] + 1) % 20 == 0 else ''}")
 
                         self.dqn_movement.train_on_mini_batch()
@@ -236,34 +231,40 @@ class SerpentCloneyGameAgent(GameAgent):
                 self.game_state["current_run"] += 1
                 self.game_state["run_reward_movement"] = 0
                 self.game_state["run_predicted_actions"] = 0
-                self.game_state["alive"] = False
+                self.game_state["alive"] = collections.deque(np.full((8,), 4), maxlen=8)
+                # self.game_state["coins"] = collections.deque(np.full((8,), 0), maxlen=8)
 
                 if self.dqn_movement.mode in ["TRAIN", "RUN"]:
-                    if self.game_state["current_run"] > 0 and self.game_state["current_run"] % 500 == 0:
+                    if self.game_state["current_run"] > 0 and self.game_state["current_run"] % 100 == 0:
                         if self.dqn_movement.type == "DDQN":
                             self.dqn_movement.update_target_model()
 
-                    if self.game_state["current_run"] > 0 and self.game_state["current_run"] % 50 == 0:
+                    if self.game_state["current_run"] > 0 and self.game_state["current_run"] % 20 == 0:
                         self.dqn_movement.enter_run_mode()
                     else:
                         self.dqn_movement.enter_train_mode()
 
-                self.input_controller.click_screen_region(screen_region="GAME_OVER_PLAY")
-                time.sleep(3)
+                self.input_controller.tap_key(KeyboardKey.KEY_SPACE)
+                time.sleep(5)
 
                 return None
 
         self.dqn_movement.pick_action()
         self.dqn_movement.generate_action()
 
-        self.input_controller.handle_keys(self.dqn_movement.get_input_values())
+        keys = self.dqn_movement.get_input_values()
+        print("")
+        print(" + ".join(list(map(lambda k: self.key_mapping.get(k.name), keys))))
+
+        self.input_controller.handle_keys(keys)
 
         if self.dqn_movement.current_action_type == "PREDICTED":
             self.game_state["run_predicted_actions"] += 1
 
-        self.dqn_movement.erode_epsilon(factor=1)
+        self.dqn_movement.erode_epsilon(factor=2)
 
         self.dqn_movement.next_step()
+
         self.game_state["current_run_steps"] += 1
 
     def handle_play(self, game_frame):
@@ -408,13 +409,6 @@ class SerpentCloneyGameAgent(GameAgent):
         time.sleep(1)
         self.input_controller.click_screen_region(screen_region="GAME_PAUSE")
 
-    def _calculate_dragon_train_reward(self, context=None):
-        reward = -0.001
-
-        reward += (-1 if context == "GAME_OVER" else 0.05)
-
-        return reward
-
     def display_game_agent_state(self, context):
         self.game_state['current_run_duration'] = (datetime.utcnow() - self.game_state['current_run_started_at']).seconds
 
@@ -451,20 +445,18 @@ class SerpentCloneyGameAgent(GameAgent):
     def _reset_game_state(self):
         # Display Variables
         self.game_state = {
-            "seed_entered": False,
-            "coins": 0,
-            "alive": False,
-            "current_run": 0,
+            "alive": collections.deque(np.full((8,), 4), maxlen=8),
+            "coins": collections.deque(np.full((8,), 0), maxlen=8),
+            "current_run": 1,
             "current_run_started_at": datetime.utcnow(),
             "current_run_duration": None,
             "current_run_steps": 0,
-            "average_aps": 0,
             "run_reward": 0,
             "run_future_rewards": 0,
             "run_predicted_actions": 0,
             "run_timestamp": datetime.utcnow(),
             "last_run": 0,
-            "last_run_duration": 1,
+            "last_run_duration": 0,
             "last_run_duration_actual": None,
             "last_run_distance": 0.0,
             "last_run_coins_collected": 0,
@@ -476,7 +468,7 @@ class SerpentCloneyGameAgent(GameAgent):
             "record_time_alive": dict(),
             "random_time_alive": None,
             "random_time_alives": list(),
-            "random_distance_travelled": None
+            "random_distance_travelled": 0.0
             }
 
         # Object Detection Variables
@@ -500,3 +492,33 @@ class SerpentCloneyGameAgent(GameAgent):
         self.pos_d = -1
         self.pos_t = -1
         self.in_progress_game_over = False
+    def _measure_dragon_alive(self, game_frame):
+        dollar_area_frame = serpent.cv.extract_region_from_image(game_frame.frame, self.game.screen_regions["DOLLAR_AREA"])
+
+        dragon_alive = None
+        max_ssim = 0
+
+        for name, sprite in self.game.sprites.items():
+            print(name)
+            print(name[-1])
+            for i in range(sprite.image_data.shape[3]):
+                ssim = skimage.measure.compare_ssim(dollar_area_frame, np.squeeze(sprite.image_data[..., :3, i]), multichannel=True)
+
+                if ssim > max_ssim:
+                    max_ssim = ssim
+                    dragon_alive = 1 # int(name[-1])
+
+        return dragon_alive
+
+    def _measure_dragon_coins(self, game_frame):
+        coins_area_frame = serpent.cv.extract_region_from_image(game_frame.frame, self.game.screen_regions["COINS_AREA"])
+
+        return coins_area_frame[coins_area_frame[..., 2] > 150].size
+
+    def _calculate_reward(self):
+        reward = 0
+
+        reward += (-0.5 if self.game_state["alive"][0] < self.game_state["alive"][1] else 0.05)
+        # reward += (0.5 if (self.game_state["coins"][0] - self.game_state["coins"][1]) >= 1 else -0.05)
+
+        return reward
