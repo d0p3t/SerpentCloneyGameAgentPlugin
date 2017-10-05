@@ -30,8 +30,6 @@ import label_map_util
 # 'class': 'leaves'}]
 # ==============================================
 
-
-
 class ObjectDetector:
     def __init__(self, graph_fp, labels_fp, num_classes=1, threshold=0.6):
         self.graph_fp = graph_fp
@@ -87,40 +85,39 @@ class ObjectDetector:
 
     def predict(self, frame):
         self.in_progress = True
+        with tf.device('/gpu:0'):
+            with self.graph.as_default():
+                height, width, _ = frame.shape
 
-        with self.graph.as_default():
-            height, width, _ = frame.shape
+                # frame_resized = frame.reshape((height, width, 3)).astype(np.uint8)
 
-            #frame_resized = frame.reshape((height, width, 3)).astype(np.uint8)
+                frame_np_expanded = np.expand_dims(frame, axis=0)
 
-            frame_np_expanded = np.expand_dims(frame, axis=0)
-
-            (boxes, scores, classes, num_detections) = self.session.run(
-                [self.boxes, self.scores, self.classes, self.num_detections],
-                feed_dict={
-                    self.image_tensor: frame_np_expanded
-                })
-
-            filtered_results = []
-            for i in range(0, num_detections[0].astype(np.uint8)):
-                score = scores[0][i]
-                if score >= self.threshold:
-                    y1, x1, y2, x2 = boxes[0][i]
-                    y1_o = int(y1 * height)
-                    x1_o = int(x1 * width)
-                    y2_o = int(y2 * height)
-                    x2_o = int(x2 * width)
-                    predicted_class = self.category_index[classes[0][i]]['name']
-                    filtered_results.append({
-                        "score": score,
-                        "bb": boxes[0][i],
-                        "bb_o": [y1_o, x1_o, y2_o, x2_o],
-                        "class": predicted_class
+                (boxes, scores, classes, num_detections) = self.session.run(
+                    [self.boxes, self.scores, self.classes, self.num_detections],
+                    feed_dict={
+                        self.image_tensor: frame_np_expanded
                     })
 
-            return filtered_results
+                filtered_results = []
+                for i in range(0, num_detections[0].astype(np.uint8)):
+                    score = scores[0][i]
+                    if score >= self.threshold:
+                        y1, x1, y2, x2 = boxes[0][i]
+                        y1_o = int(y1 * height)
+                        x1_o = int(x1 * width)
+                        y2_o = int(y2 * height)
+                        x2_o = int(x2 * width)
+                        predicted_class = self.category_index[classes[0][i]]['name']
+                        filtered_results.append({
+                            "score": score,
+                            "bb": boxes[0][i],
+                            "bb_o": [y1_o, x1_o, y2_o, x2_o],
+                            "class": predicted_class
+                        })
 
-        self.in_progress = False
+                self.in_progress = False
+                return filtered_results
 
     def get_status(self):
         return self.in_progress
